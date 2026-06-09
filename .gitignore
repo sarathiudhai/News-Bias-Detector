@@ -1,0 +1,18 @@
+# ── Python / Backend ──
+backend/venv/
+backend/__pycache__/
+backend/*.pyc
+backend/bias_detector.db
+.env
+*.db
+
+# ── Node / Frontend ──
+frontend/node_modules/
+frontend/dist/
+frontend/.eslintcache
+npm-debug.log*
+
+# ── OS / IDE ──
+.DS_Store
+.vscode/
+.idea/
