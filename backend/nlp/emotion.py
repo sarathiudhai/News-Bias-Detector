@@ -71,16 +71,10 @@ INTENSITY_WEIGHT = {
     "positive": 0.6,
 }
 
-
-def _preprocess_for_roberta(text: str) -> str:
-    """Preprocess text for twitter-roberta model."""
-    text = re.sub(r"@\w+", "@user", text)
-    text = re.sub(r"https?://\S+", "http", text)
-    return text
-
+from textblob import TextBlob
 
 class EmotionDetector:
-    """Singleton emotional language detector."""
+    """Singleton emotional language detector using TextBlob + NRC Lexicon to save RAM."""
 
     _instance = None
 
@@ -93,16 +87,8 @@ class EmotionDetector:
     def __init__(self):
         if self._initialized:
             return
-        logger.info("Loading sentiment model: cardiffnlp/twitter-roberta-base-sentiment")
-        self._pipe = pipeline(
-            "sentiment-analysis",
-            model="cardiffnlp/twitter-roberta-base-sentiment",
-            top_k=None,
-            truncation=True,
-            max_length=512,
-        )
+        logger.info("Initializing lightweight TextBlob sentiment analyzer...")
         self._initialized = True
-        logger.info("Sentiment model loaded successfully.")
 
     def _get_flagged_words(self, text: str) -> list[str]:
         """Find emotionally charged words using the curated lexicon."""
@@ -115,41 +101,40 @@ class EmotionDetector:
 
     def analyze_sentences(self, sentences: list[str]) -> list[dict]:
         """
-        Analyze emotional content of each sentence.
+        Analyze emotional content of each sentence using TextBlob and NRC lexicon.
 
         Returns:
             List of dicts with label, score, flagged_words, uncertain.
         """
         results = []
-        batch_size = 16
 
-        preprocessed = [_preprocess_for_roberta(s) for s in sentences]
-        all_sentiments = []
+        for sentence in sentences:
+            blob = TextBlob(sentence)
+            polarity = blob.sentiment.polarity
+            subjectivity = blob.sentiment.subjectivity
 
-        for i in range(0, len(preprocessed), batch_size):
-            batch = preprocessed[i : i + batch_size]
-            batch_outputs = self._pipe(batch)
-            all_sentiments.extend(batch_outputs)
-
-        for idx, sentence in enumerate(sentences):
-            sentiment_output = all_sentiments[idx]
-            top = max(sentiment_output, key=lambda x: x["score"])
-            raw_label = top["label"]
-            label = SENTIMENT_MAP.get(raw_label, raw_label.lower())
-            confidence = top["score"]
-
-            intensity_mult = INTENSITY_WEIGHT.get(label, 0.5)
-            base_score = confidence * intensity_mult
+            # Map polarity (-1.0 to 1.0) to labels and base score
+            if polarity <= -0.1:
+                label = "negative"
+                base_score = abs(polarity) * 100
+            elif polarity >= 0.1:
+                label = "positive"
+                base_score = (polarity * 100) * 0.6  # Weight positive slightly less
+            else:
+                label = "neutral"
+                base_score = 10.0
 
             flagged_words = self._get_flagged_words(sentence)
-            word_boost = min(30, len(flagged_words) * 8)
-            emotion_score = min(100, int(base_score * 100) + word_boost)
+            
+            # Boost score based on strong emotional words found
+            word_boost = min(40, len(flagged_words) * 10)
+            emotion_score = min(100, int(base_score) + word_boost)
 
             results.append({
                 "label": label,
                 "score": emotion_score,
                 "flagged_words": flagged_words,
-                "uncertain": int(confidence * 100) < 50,
+                "uncertain": subjectivity < 0.3, # Low subjectivity = mostly factual, so emotion label is uncertain
             })
 
         return results
