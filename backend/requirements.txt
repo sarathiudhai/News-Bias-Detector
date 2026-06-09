@@ -7,6 +7,5 @@ beautifulsoup4==4.12.3
 requests==2.32.3
 spacy==3.7.5
 transformers==4.44.2
-torch==2.4.1
 textblob==0.18.0.post0
 pydantic==2.8.2
