@@ -8,8 +8,6 @@ Singleton pattern — model loaded once at startup.
 
 import logging
 import re
-from transformers import pipeline
-
 logger = logging.getLogger(__name__)
 
 # Curated emotion lexicon — words strongly associated with emotional charge
