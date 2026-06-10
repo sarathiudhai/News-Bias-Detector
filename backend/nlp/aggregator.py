@@ -26,7 +26,8 @@ def _tokenize_sentences(text: str, nlp) -> list[str]:
 def _group_into_paragraphs(sentences: list[str], original_text: str) -> list[list[int]]:
     """
     Group sentence indices into paragraphs based on double-newline splits
-    in the original text. Returns list of lists of sentence indices.
+    in the original text. Uses character-offset tracking for robustness
+    against duplicate sentences.
     """
     paragraphs_text = original_text.split("\n\n")
     paragraphs_text = [p.strip() for p in paragraphs_text if p.strip()]
@@ -34,27 +35,45 @@ def _group_into_paragraphs(sentences: list[str], original_text: str) -> list[lis
     if not paragraphs_text:
         return [list(range(len(sentences)))]
 
-    paragraph_groups = []
-    sentence_idx = 0
+    # Build paragraph boundaries using character offsets
+    para_boundaries = []
+    search_start = 0
+    for para in paragraphs_text:
+        idx = original_text.find(para, search_start)
+        if idx == -1:
+            idx = search_start  # Fallback if not found
+        para_boundaries.append((idx, idx + len(para)))
+        search_start = idx + len(para)
 
-    for para_text in paragraphs_text:
-        group = []
-        while sentence_idx < len(sentences):
-            if sentences[sentence_idx] in para_text:
-                group.append(sentence_idx)
-                sentence_idx += 1
-            else:
+    # Assign each sentence to a paragraph by finding its position in the text
+    sentence_positions = []
+    text_cursor = 0
+    for sent in sentences:
+        pos = original_text.find(sent, text_cursor)
+        if pos == -1:
+            pos = text_cursor  # Fallback
+        sentence_positions.append(pos)
+        text_cursor = pos + len(sent)
+
+    # Group sentences into paragraphs
+    paragraph_groups = [[] for _ in paragraphs_text]
+    for sent_idx, sent_pos in enumerate(sentence_positions):
+        assigned = False
+        for para_idx, (start, end) in enumerate(para_boundaries):
+            if start <= sent_pos < end:
+                paragraph_groups[para_idx].append(sent_idx)
+                assigned = True
                 break
-        if group:
-            paragraph_groups.append(group)
+        if not assigned:
+            # Assign to the last paragraph as fallback
+            paragraph_groups[-1].append(sent_idx)
 
-    # Any remaining sentences go into the last paragraph
-    if sentence_idx < len(sentences):
-        remaining = list(range(sentence_idx, len(sentences)))
-        if paragraph_groups:
-            paragraph_groups[-1].extend(remaining)
-        else:
-            paragraph_groups.append(remaining)
+    # Remove empty paragraph groups
+    paragraph_groups = [g for g in paragraph_groups if g]
+
+    # If nothing got assigned, put everything in one group
+    if not paragraph_groups:
+        paragraph_groups = [list(range(len(sentences)))]
 
     return paragraph_groups
 

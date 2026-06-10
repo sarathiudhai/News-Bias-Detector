@@ -4,6 +4,7 @@ backend/__pycache__/
 backend/*.pyc
 backend/bias_detector.db
 .env
+*.env
 *.db
 
 # ── Node / Frontend ──

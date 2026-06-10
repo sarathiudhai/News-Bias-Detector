@@ -6,17 +6,22 @@ Endpoints:
   POST /compare — Compare two articles side by side
   GET  /history — Last 20 analyses
   GET  /history/{id} — Single analysis by ID
+  DELETE /history/{id} — Delete single analysis by ID
 """
 
+import os
 import json
 import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from database import get_db, init_db
 from models import Analysis
@@ -33,23 +38,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Startup — preload all ML models once
+# Rate Limiter
+# ---------------------------------------------------------------------------
+limiter = Limiter(key_func=get_remote_address)
+
+# ---------------------------------------------------------------------------
+# Startup — preload lightweight models once
 # ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load ML models at startup so first request isn't slow."""
+    """Load models at startup so first request isn't slow."""
     logger.info("=== Initializing database ===")
     init_db()
 
-    logger.info("=== Preloading ML models (this may take a minute on first run) ===")
+    logger.info("=== Preloading NLP models ===")
     from nlp.bias import BiasClassifier
     from nlp.emotion import EmotionDetector
     from nlp.factual import FactualDensityScorer
 
-    BiasClassifier()
-    EmotionDetector()
-    FactualDensityScorer()
+    BiasClassifier()       # Initializes HF API client (no download)
+    EmotionDetector()      # Lightweight TextBlob
+    FactualDensityScorer() # spaCy en_core_web_sm (~15MB)
     logger.info("=== All models loaded. Server ready. ===")
     yield
 
@@ -65,14 +75,29 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS for React frontend
+# Register rate limiter
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# CORS — read origins from env var, fallback to localhost
+cors_origins_str = os.environ.get(
+    "CORS_ORIGINS",
+    "http://localhost:5173,http://127.0.0.1:5173",
+)
+cors_origins = [origin.strip() for origin in cors_origins_str.split(",") if origin.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+MAX_INPUT_LENGTH = 50000  # Max characters for article text input
 
 # ---------------------------------------------------------------------------
 # Pydantic schemas
@@ -81,6 +106,15 @@ app.add_middleware(
 class AnalyzeRequest(BaseModel):
     text: Optional[str] = None
     url: Optional[str] = None
+
+    @field_validator("text")
+    @classmethod
+    def validate_text_length(cls, v):
+        if v is not None and len(v) > MAX_INPUT_LENGTH:
+            raise ValueError(
+                f"Text too long ({len(v)} chars). Maximum is {MAX_INPUT_LENGTH} characters."
+            )
+        return v
 
 
 class CompareRequest(BaseModel):
@@ -155,7 +189,8 @@ def _run_analysis(req: AnalyzeRequest, db: Session) -> dict:
 # ---------------------------------------------------------------------------
 
 @app.post("/analyze")
-def analyze(req: AnalyzeRequest, db: Session = Depends(get_db)):
+@limiter.limit("10/minute")
+def analyze(request: Request, req: AnalyzeRequest, db: Session = Depends(get_db)):
     """
     Analyze a single article for bias, emotion, and factual density.
     Accepts either {text: string} or {url: string}.
@@ -167,7 +202,8 @@ def analyze(req: AnalyzeRequest, db: Session = Depends(get_db)):
 
 
 @app.post("/compare")
-def compare(req: CompareRequest, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+def compare(request: Request, req: CompareRequest, db: Session = Depends(get_db)):
     """
     Compare two articles side by side.
     Each article can be provided as text or URL.
